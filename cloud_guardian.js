@@ -238,13 +238,13 @@ async function disinfectBranch(repo, branchName, headSha, idx) {
 
 async function getOmniRepos() {
   let all = [];
-  for (let page = 1; page <= 3; page++) {
+  for (let page = 1; page <= 10; page++) {
     const res = await ghApi('GET', `/orgs/${ORG}/repos?per_page=100&page=${page}`);
     if (!Array.isArray(res) || res.length === 0) break;
     all.push(...res);
   }
   const omni = all
-    .filter(r => /omni/i.test(r.name) && !r.archived && r.size > 0 && r.name !== 'omni-security-guardian')
+    .filter(r => /omni/i.test(r.name) && !r.archived && r.name !== 'OmniNextTechInboundMailWorker' && r.name !== 'omni-security-guardian')
     .map(r => r.name)
     .sort();
   // Mask all private repo names in GitHub Actions logs

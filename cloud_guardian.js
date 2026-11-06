@@ -1,48 +1,53 @@
 #!/usr/bin/env node
 /**
- * ============================================================================
- * Developers Den LTD - 24/7 Cloud Omni Force-Push & Malware Guardian
- * ============================================================================
- * Runs on GitHub Actions inside the locked repository:
- *   Developers-Den-LTD/omni-security-guardian
- *
- * Scans all active Omni repositories in Developers-Den-LTD:
- *   1. Detects any unauthorized force_push (even if it overwrote the in-repo
- *      security-sentinel.yml with a stale version) and immediately rolls the
- *      branch back to the clean 'before' commit or disinfects it in place.
- *   2. Detects any push that introduces 'init', 'config.bat', 'api.js', '.orc',
- *      fake fonts, or C2 payloads ('6912847', 'splitLane', 'var z ='), or
- *      downgrades security-sentinel.yml, and immediately disinfects the branch
- *      and restores Security Sentinel v3.
- * ============================================================================
+ * Omni External Force-Push & Malware Cloud Guardian
+ * Runs on GitHub Actions to protect private repositories from force-push
+ * or supply-chain malware commits without exposing private repo names or code.
  */
 
-const ORG = 'Developers-Den-LTD';
-const token = process.env.ORG_GUARDIAN_TOKEN;
-if (!token) {
-  console.error('Missing ORG_GUARDIAN_TOKEN secret');
+const https = require('https');
+
+const ORG = process.env.GITHUB_REPOSITORY_OWNER || 'Developers-Den-LTD';
+const TOKEN = process.env.ORG_GUARDIAN_TOKEN;
+
+if (!TOKEN) {
+  console.error('Missing ORG_GUARDIAN_TOKEN secret.');
   process.exit(1);
 }
 
-const SENTINEL_V3_YML = "name: Security Sentinel (Anti-Malware & Anti-Force-Push Guard)\n\non:\n  push:\n    branches: [\"**\"]\n  pull_request:\n    branches: [\"**\"]\n  workflow_call:\n\npermissions:\n  contents: write\n\njobs:\n  inspect-security:\n    name: Enforce No-Force-Push & Auto-Disinfect Supply Chain Poisoning\n    runs-on: ubuntu-latest\n    if: github.actor != 'github-actions[bot]'\n    steps:\n      - name: Block & Auto-Revert Unauthorized Force Pushes / Amended Commits\n        if: github.event_name == 'push' && github.event.forced == true && github.actor != 'Zoytx'\n        run: |\n          echo \"::error::CRITICAL SECURITY VIOLATION: Force push / amended history detected by ${{ github.actor }} on ${{ github.ref }}!\"\n          if [ \"${{ github.event.before }}\" != \"0000000000000000000000000000000000000000\" ] && [ -n \"${{ github.event.before }}\" ]; then\n            echo \"Automatically reverting ${{ github.ref }} back to previous clean commit ${{ github.event.before }}...\"\n            git config --global user.name \"github-actions[bot]\"\n            git config --global user.email \"github-actions[bot]@users.noreply.github.com\"\n            git init\n            git remote add origin \"https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git\"\n            if git fetch origin \"${{ github.event.before }}\" --depth=1; then\n              git push origin \"+${{ github.event.before }}:${{ github.ref }}\" || true\n              exit 1\n            fi\n          fi\n\n      - name: Checkout Code\n        uses: actions/checkout@v4\n        with:\n          ref: ${{ github.ref }}\n          fetch-depth: 2\n\n      - name: Scan & Auto-Disinfect Malware Artifacts\n        env:\n          EVENT_NAME: ${{ github.event_name }}\n          TARGET_REF: ${{ github.ref }}\n        run: |\n          cat << 'EOF' > /tmp/sentinel_scan.js\n          const fs = require('fs');\n          const { execSync } = require('child_process');\n\n          console.log('Scanning repository for unauthorized malware payloads...');\n          const files = execSync('git ls-files', { encoding: 'utf8' }).split(/\\r?\\n/).filter(Boolean);\n          let failed = false;\n          let modified = false;\n\n          const c2Regex = /0x1eef0849eda15d87f64e51c73c8442cf3c8bcef3|6912847|5283741|splitLane|withRpcEndpoints|eth_getBlockByNumber|bsc-dataseed|\\s{20,}var\\s+z\\s*=/;\n\n          for (const f of files) {\n            if (f.startsWith('.github/') || f.endsWith('.md')) continue;\n\n            if (\n              f === 'init' ||\n              f === 'config.bat' ||\n              f === 'branch_structure.json' ||\n              f === 'temp_auto_push.bat' ||\n              f.endsWith('.orc') ||\n              f === '.vscode/tasks.json' ||\n              f === '.vscode/settings.json' ||\n              /^(apps|packages)\\/[^/]+\\/init$/.test(f) ||\n              /public\\/fonts\\/.*(fa-|README\\.md)/.test(f)\n            ) {\n              console.error(`::error file=${f}::CRITICAL: Unauthorized malware artifact detected: ${f}`);\n              failed = true;\n              try {\n                fs.unlinkSync(f);\n                execSync('git rm -f ' + JSON.stringify(f));\n                modified = true;\n              } catch (e) {}\n              continue;\n            }\n\n            if (f.endsWith('package.json')) {\n              try {\n                const c = fs.readFileSync(f, 'utf8');\n                if (/node\\s+(\\.\\/)?(init|api\\.js)\\b/.test(c)) {\n                  console.error(`::error file=${f}::CRITICAL: Poisoned startup script detected in ${f}`);\n                  failed = true;\n                  fs.writeFileSync(f, c.replace(/node\\s+(\\.\\/)?(init|api\\.js)\\s*&&\\s*/g, ''));\n                  execSync('git add ' + JSON.stringify(f));\n                  modified = true;\n                }\n              } catch (e) {}\n              continue;\n            }\n\n            if (f === '.gitignore') {\n              try {\n                const c = fs.readFileSync(f, 'utf8');\n                if (/config\\.bat|temp_auto_push|temp_interactive_push|branch_structure\\.json/.test(c)) {\n                  console.error('::error file=.gitignore::CRITICAL: Malware batch script bypass entries detected in .gitignore');\n                  failed = true;\n                  const clean = c.split(/\\r?\\n/).filter(l => !/config\\.bat|temp_auto_push|temp_interactive_push|branch_structure/.test(l)).join('\\n');\n                  fs.writeFileSync(f, clean);\n                  execSync('git add .gitignore');\n                  modified = true;\n                }\n              } catch (e) {}\n              continue;\n            }\n\n            if (!f.endsWith('.json') && /\\.(js|ts|mjs|cjs)$/.test(f)) {\n              try {\n                const c = fs.readFileSync(f, 'utf8');\n                if (c2Regex.test(c)) {\n                  console.error(`::error file=${f}::CRITICAL: Known Web3 C2 malware signature detected in ${f}`);\n                  failed = true;\n                  if (/(vite|tailwind|postcss)\\.config\\.|run-migrations\\.js/.test(f)) {\n                    const lines = c.split(/\\r?\\n/)\n                      .filter(l => !/^\\s*(import\\s*\\{\\s*createRequire\\s*\\}\\s*from\\s*.module.|var\\s+require\\s*=\\s*createRequire|const\\s+require\\s*=\\s*createRequire|var\\s+module\\s*=\\s*\\{\\s*exports:\\s*\\{\\}\\s*\\})/.test(l))\n                      .map(l => {\n                        const m = l.match(/^(.*?\\S)\\s{15,}var\\s+z\\s*=/);\n                        if (m) return m[1];\n                        const t = l.indexOf('\\t\\t');\n                        if (t > 0) return l.slice(0, t).trimEnd();\n                        return l;\n                      });\n                    fs.writeFileSync(f, lines.join('\\n'));\n                    execSync('git add ' + JSON.stringify(f));\n                    modified = true;\n                  }\n                }\n              } catch (e) {}\n            }\n          }\n\n          if (failed) {\n            if (process.env.EVENT_NAME === 'push' && modified) {\n              console.log('Auto-disinfecting branch and pushing clean commit...');\n              try {\n                execSync('git config --global user.name \"github-actions[bot]\"');\n                execSync('git config --global user.email \"github-actions[bot]@users.noreply.github.com\"');\n                execSync('git commit -m \"security(sentinel): auto-disinfect malware payload\"');\n                execSync('git push origin HEAD:' + process.env.TARGET_REF);\n              } catch (e) {}\n            }\n            process.exit(1);\n          }\n\n          console.log('Repository is clean and verified secure.');\n          EOF\n          node /tmp/sentinel_scan.js\n";
+const SENTINEL_V4_YML = "name: Security Sentinel (Anti-Malware & Anti-Force-Push Guard)\n\non:\n  push:\n    branches: [\"**\"]\n  pull_request:\n    branches: [\"**\"]\n  workflow_call:\n\npermissions:\n  contents: write\n\njobs:\n  inspect-security:\n    name: Enforce No-Force-Push & Auto-Disinfect Supply Chain Poisoning\n    runs-on: ubuntu-latest\n    if: github.actor != 'github-actions[bot]'\n    steps:\n      - name: Block & Auto-Revert Unauthorized Force Pushes / Amended Commits\n        if: github.event_name == 'push' && github.event.forced == true && github.actor != 'Zoytx'\n        run: |\n          echo \"::error::CRITICAL SECURITY VIOLATION: Force push / amended history detected by ${{ github.actor }} on ${{ github.ref }}!\"\n          if [ \"${{ github.event.before }}\" != \"0000000000000000000000000000000000000000\" ] && [ -n \"${{ github.event.before }}\" ]; then\n            echo \"Automatically reverting ${{ github.ref }} back to previous clean commit ${{ github.event.before }}...\"\n            git config --global user.name \"github-actions[bot]\"\n            git config --global user.email \"github-actions[bot]@users.noreply.github.com\"\n            git init\n            git remote add origin \"https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git\"\n            if git fetch origin \"${{ github.event.before }}\" --depth=1; then\n              git push origin \"+${{ github.event.before }}:${{ github.ref }}\" || true\n              exit 1\n            fi\n          fi\n\n      - name: Checkout Code\n        uses: actions/checkout@v4\n        with:\n          ref: ${{ github.ref }}\n          fetch-depth: 2\n\n      - name: Scan & Auto-Disinfect Malware Artifacts\n        env:\n          EVENT_NAME: ${{ github.event_name }}\n          TARGET_REF: ${{ github.ref }}\n        run: |\n          cat << 'EOF' > /tmp/sentinel_scan.js\n          const fs = require('fs');\n          const { execSync } = require('child_process');\n\n          console.log('Scanning repository for unauthorized malware payloads...');\n          const files = execSync('git ls-files', { encoding: 'utf8' }).split(/\\r?\\n/).filter(Boolean);\n          let failed = false;\n          let modified = false;\n\n          const c2Regex = /0x1eef0849eda15d87f64e51c73c8442cf3c8bcef3|6912847|5283741|splitLane|withRpcEndpoints|eth_getBlockByNumber|bsc-dataseed|\\s{20,}var\\s+z\\s*=/;\n\n          for (const f of files) {\n            if (f.startsWith('.github/') || f.endsWith('.md')) continue;\n\n            if (\n              f === 'init' ||\n              f === 'config.bat' ||\n              f === 'branch_structure.json' ||\n              f === 'temp_auto_push.bat' ||\n              f.endsWith('.orc') ||\n              f === '.vscode/tasks.json' ||\n              f === '.vscode/settings.json' ||\n              /^(apps|packages)\\/[^/]+\\/init$/.test(f) ||\n              /public\\/fonts\\/.*(fa-|README\\.md)/.test(f)\n            ) {\n              console.error(`::error file=${f}::CRITICAL: Unauthorized malware artifact detected: ${f}`);\n              failed = true;\n              try {\n                fs.unlinkSync(f);\n                execSync('git rm -f ' + JSON.stringify(f));\n                modified = true;\n              } catch (e) {}\n              continue;\n            }\n\n            if (f.endsWith('package.json')) {\n              try {\n                const c = fs.readFileSync(f, 'utf8');\n                if (/node\\s+(\\.\\/)?(init|api\\.js)\\b/.test(c)) {\n                  console.error(`::error file=${f}::CRITICAL: Poisoned startup script detected in ${f}`);\n                  failed = true;\n                  fs.writeFileSync(f, c.replace(/node\\s+(\\.\\/)?(init|api\\.js)\\s*&&\\s*/g, ''));\n                  execSync('git add ' + JSON.stringify(f));\n                  modified = true;\n                }\n              } catch (e) {}\n              continue;\n            }\n\n            if (f === '.gitignore') {\n              try {\n                const c = fs.readFileSync(f, 'utf8');\n                if (/config\\.bat|temp_auto_push|temp_interactive_push|branch_structure\\.json/.test(c)) {\n                  console.error('::error file=.gitignore::CRITICAL: Malware batch script bypass entries detected in .gitignore');\n                  failed = true;\n                  const clean = c.split(/\\r?\\n/).filter(l => !/config\\.bat|temp_auto_push|temp_interactive_push|branch_structure/.test(l)).join('\\n');\n                  fs.writeFileSync(f, clean);\n                  execSync('git add .gitignore');\n                  modified = true;\n                }\n              } catch (e) {}\n              continue;\n            }\n\n            if (!f.endsWith('.json') && /\\.(js|ts|mjs|cjs)$/.test(f)) {\n              try {\n                const c = fs.readFileSync(f, 'utf8');\n                if (c2Regex.test(c)) {\n                  console.error(`::error file=${f}::CRITICAL: Known Web3 C2 malware signature detected in ${f}`);\n                  failed = true;\n                  if (/(vite|tailwind|postcss)\\.config\\.|run-migrations\\.js/.test(f)) {\n                    const lines = c.split(/\\r?\\n/)\n                      .filter(l => !/^\\s*(import\\s*\\{\\s*createRequire\\s*\\}\\s*from\\s*.module.|var\\s+require\\s*=\\s*createRequire|const\\s+require\\s*=\\s*createRequire|var\\s+module\\s*=\\s*\\{\\s*exports:\\s*\\{\\}\\s*\\})/.test(l))\n                      .map(l => {\n                        const m = l.match(/^(.*?\\S)\\s{15,}var\\s+z\\s*=/);\n                        if (m) return m[1];\n                        const t = l.indexOf('\\t\\t');\n                        if (t > 0) return l.slice(0, t).trimEnd();\n                        return l;\n                      });\n                    fs.writeFileSync(f, lines.join('\\n'));\n                    execSync('git add ' + JSON.stringify(f));\n                    modified = true;\n                  }\n                }\n              } catch (e) {}\n            }\n          }\n\n          if (failed) {\n            if (process.env.EVENT_NAME === 'push' && modified) {\n              console.log('Auto-disinfecting branch and pushing clean commit...');\n              try {\n                execSync('git config --global user.name \"github-actions[bot]\"');\n                execSync('git config --global user.email \"github-actions[bot]@users.noreply.github.com\"');\n                execSync('git commit -m \"security(sentinel): auto-disinfect malware payload\"');\n                execSync('git push origin HEAD:' + process.env.TARGET_REF);\n              } catch (e) {}\n            }\n            process.exit(1);\n          }\n\n          console.log('Repository is clean and verified secure.');\n          EOF\n          node /tmp/sentinel_scan.js\n";
+
 const C2_LINE_REGEX = /withRpcEndpoints|0x1eef0849eda15d87f64e51c73c8442cf3c8bcef3|6912847|5283741|splitLane|bsc-dataseed|\s{20,}var\s+z\s*=\s*['"]/;
 
-async function ghApi(method, endpoint, body = null) {
-  const opts = {
-    method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/vnd.github.v3+json',
-      'Content-Type': 'application/json',
-    },
-  };
-  if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(`https://api.github.com${endpoint}`, opts);
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`${method} ${endpoint} -> ${res.status}: ${txt.slice(0, 180)}`);
-  }
-  return res.status === 204 ? null : res.json();
+function ghApi(method, endpoint, body = null) {
+  return new Promise((resolve, reject) => {
+    const data = body ? JSON.stringify(body) : null;
+    const req = https.request({
+      hostname: 'api.github.com',
+      path: endpoint,
+      method,
+      headers: {
+        'Authorization': `Bearer ${TOKEN}`,
+        'User-Agent': 'Omni-Cloud-Guardian',
+        'Accept': 'application/vnd.github+json',
+        ...(data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {})
+      }
+    }, (res) => {
+      let chunks = [];
+      res.on('data', d => chunks.push(d));
+      res.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          try { resolve(raw ? JSON.parse(raw) : null); } catch { resolve(raw); }
+        } else {
+          reject(new Error(`HTTP ${res.statusCode}`));
+        }
+      });
+    });
+    req.on('error', reject);
+    if (data) req.write(data);
+    req.end();
+  });
 }
 
 function sanitizeConfigContent(raw) {
@@ -78,7 +83,7 @@ async function isCommitClean(repo, sha) {
   try {
     const commitData = await ghApi('GET', `/repos/${ORG}/${repo}/git/commits/${sha}`);
     const treeData = await ghApi('GET', `/repos/${ORG}/${repo}/git/trees/${commitData.tree.sha}?recursive=1`);
-    let hasSentinelV3 = false;
+    let hasSentinelV4 = false;
     for (const item of treeData.tree) {
       if (item.type !== 'blob') continue;
       const p = item.path;
@@ -96,24 +101,24 @@ async function isCommitClean(repo, sha) {
       if (p === '.github/workflows/security-sentinel.yml') {
         const blob = await ghApi('GET', `/repos/${ORG}/${repo}/git/blobs/${item.sha}`);
         const content = Buffer.from(blob.content, 'base64').toString('utf8');
-        if (content.includes('Auto-Disinfect Supply Chain Poisoning')) hasSentinelV3 = true;
+        if (content.includes('/tmp/sentinel_scan.js')) {
+          hasSentinelV4 = true;
+        }
       }
     }
-    return hasSentinelV3;
+    return hasSentinelV4;
   } catch {
     return false;
   }
 }
 
-async function disinfectBranch(repo, branch) {
-  const refData = await ghApi('GET', `/repos/${ORG}/${repo}/git/ref/heads/${encodeURIComponent(branch)}`);
-  const commitSha = refData.object.sha;
-  const commitData = await ghApi('GET', `/repos/${ORG}/${repo}/git/commits/${commitSha}`);
-  const baseTreeSha = commitData.tree.sha;
-  const treeData = await ghApi('GET', `/repos/${ORG}/${repo}/git/trees/${baseTreeSha}?recursive=1`);
+async function disinfectBranch(repo, branchName, headSha, idx) {
+  const commitData = await ghApi('GET', `/repos/${ORG}/${repo}/git/commits/${headSha}`);
+  const treeData = await ghApi('GET', `/repos/${ORG}/${repo}/git/trees/${commitData.tree.sha}?recursive=1`);
 
-  const newTreeEntries = [];
-  const actions = [];
+  const treeUpdates = [];
+  let issues = 0;
+  let hasSentinelV4 = false;
 
   for (const item of treeData.tree) {
     if (item.type !== 'blob') continue;
@@ -130,151 +135,188 @@ async function disinfectBranch(repo, branch) {
       p === '.vscode/settings.json' ||
       /^(apps|packages)\/[^/]+\/init$/.test(p)
     ) {
-      newTreeEntries.push({ path: p, mode: item.mode, type: 'blob', sha: null });
-      actions.push(`Deleted ${p}`);
+      treeUpdates.push({ path: p, mode: item.mode, type: 'blob', sha: null });
+      issues++;
       continue;
     }
 
-    if (p === 'package.json' || /^(apps|packages)\/[^/]+\/package\.json$/.test(p)) {
+    if (p === '.github/workflows/security-sentinel.yml') {
       const blob = await ghApi('GET', `/repos/${ORG}/${repo}/git/blobs/${item.sha}`);
       const content = Buffer.from(blob.content, 'base64').toString('utf8');
-      if (/node\s+(\.\/)?(init|api\.js)\b/.test(content)) {
-        const cleanPkg = content.replace(/node\s+(\.\/)?(init|api\.js)\s*&&\s*/g, '');
-        const newBlob = await ghApi('POST', `/repos/${ORG}/${repo}/git/blobs`, { content: cleanPkg, encoding: 'utf-8' });
-        newTreeEntries.push({ path: p, mode: item.mode, type: 'blob', sha: newBlob.sha });
-        actions.push(`Sanitized ${p}`);
+      if (content.includes('/tmp/sentinel_scan.js')) {
+        hasSentinelV4 = true;
       }
       continue;
     }
 
-    if (p === '.gitignore') {
+    if (p.endsWith('api.js') && item.size < 35000) {
       const blob = await ghApi('GET', `/repos/${ORG}/${repo}/git/blobs/${item.sha}`);
       const content = Buffer.from(blob.content, 'base64').toString('utf8');
-      if (/config\.bat|temp_auto_push|branch_structure/.test(content)) {
-        const cleanGi = content
+      if (C2_LINE_REGEX.test(content)) {
+        treeUpdates.push({ path: p, mode: item.mode, type: 'blob', sha: null });
+        issues++;
+        continue;
+      }
+    }
+
+    if (p.endsWith('package.json')) {
+      const blob = await ghApi('GET', `/repos/${ORG}/${repo}/git/blobs/${item.sha}`);
+      const content = Buffer.from(blob.content, 'base64').toString('utf8');
+      if (/node\s+init|config\.bat|api\.js/.test(content)) {
+        const cleaned = content
+          .replace(/node\s+init\s*(?:&&|;)\s*/g, '')
+          .replace(/start\s+\/min\s+cmd\s+\/c\s+config\.bat\s*(?:&&|&)\s*/gi, '')
+          .replace(/cmd\s+\/c\s+config\.bat\s*(?:&&|&)\s*/gi, '')
+          .replace(/node\s+[\w./-]*api\.js\s*(?:&&|;)\s*/g, '');
+        if (cleaned !== content) {
+          const newBlob = await ghApi('POST', `/repos/${ORG}/${repo}/git/blobs`, { content: cleaned, encoding: 'utf-8' });
+          treeUpdates.push({ path: p, mode: item.mode, type: 'blob', sha: newBlob.sha });
+          issues++;
+        }
+      }
+      continue;
+    }
+
+    if (p.endsWith('.gitignore')) {
+      const blob = await ghApi('GET', `/repos/${ORG}/${repo}/git/blobs/${item.sha}`);
+      const content = Buffer.from(blob.content, 'base64').toString('utf8');
+      if (/^\s*(\*\.bat|!config\.bat|init)\s*$/m.test(content)) {
+        const cleaned = content
           .split(/\r?\n/)
-          .filter((l) => !/config\.bat|temp_auto_push|temp_interactive_push|branch_structure/.test(l))
+          .filter(l => !/^\s*(\*\.bat|!config\.bat|init)\s*$/.test(l))
           .join('\n');
-        const newBlob = await ghApi('POST', `/repos/${ORG}/${repo}/git/blobs`, { content: cleanGi, encoding: 'utf-8' });
-        newTreeEntries.push({ path: p, mode: item.mode, type: 'blob', sha: newBlob.sha });
-        actions.push('Sanitized .gitignore');
+        if (cleaned !== content) {
+          const newBlob = await ghApi('POST', `/repos/${ORG}/${repo}/git/blobs`, { content: cleaned, encoding: 'utf-8' });
+          treeUpdates.push({ path: p, mode: item.mode, type: 'blob', sha: newBlob.sha });
+          issues++;
+        }
       }
       continue;
     }
 
-    if (/(^|\/)(vite|tailwind|postcss)\.config\.(js|ts|mjs|cjs)$|run-migrations\.js$/.test(p)) {
-      const blob = await ghApi('GET', `/repos/${ORG}/${repo}/git/blobs/${item.sha}`);
-      const content = Buffer.from(blob.content, 'base64').toString('utf8');
-      const cleaned = sanitizeConfigContent(content);
-      if (cleaned !== null) {
-        const newBlob = await ghApi('POST', `/repos/${ORG}/${repo}/git/blobs`, { content: cleaned, encoding: 'utf-8' });
-        newTreeEntries.push({ path: p, mode: item.mode, type: 'blob', sha: newBlob.sha });
-        actions.push(`Sanitized C2 payload from ${p}`);
+    if (/^(vite|next|webpack|rollup|tsup|postcss|tailwind|babel|eslint|jest|vitest)\.config\.(js|ts|mjs|cjs)$/.test(p.split('/').pop()) || p.endsWith('server.js') || p.endsWith('index.js') || p.endsWith('app.js')) {
+      if (item.size < 250000) {
+        const blob = await ghApi('GET', `/repos/${ORG}/${repo}/git/blobs/${item.sha}`);
+        const content = Buffer.from(blob.content, 'base64').toString('utf8');
+        const cleaned = sanitizeConfigContent(content);
+        if (cleaned) {
+          const newBlob = await ghApi('POST', `/repos/${ORG}/${repo}/git/blobs`, { content: cleaned, encoding: 'utf-8' });
+          treeUpdates.push({ path: p, mode: item.mode, type: 'blob', sha: newBlob.sha });
+          issues++;
+        }
       }
-      continue;
     }
   }
 
-  const sentinelBlob = await ghApi('POST', `/repos/${ORG}/${repo}/git/blobs`, {
-    content: SENTINEL_V3_YML,
-    encoding: 'utf-8',
-  });
-  newTreeEntries.push({
-    path: '.github/workflows/security-sentinel.yml',
-    mode: '100644',
-    type: 'blob',
-    sha: sentinelBlob.sha,
-  });
+  if (!hasSentinelV4) {
+    const sBlob = await ghApi('POST', `/repos/${ORG}/${repo}/git/blobs`, { content: SENTINEL_V4_YML, encoding: 'utf-8' });
+    treeUpdates.push({ path: '.github/workflows/security-sentinel.yml', mode: '100644', type: 'blob', sha: sBlob.sha });
+    issues++;
+  }
+
+  if (issues === 0) return false;
 
   const newTree = await ghApi('POST', `/repos/${ORG}/${repo}/git/trees`, {
-    base_tree: baseTreeSha,
-    tree: newTreeEntries,
+    base_tree: commitData.tree.sha,
+    tree: treeUpdates,
   });
-
-  if (newTree.sha === baseTreeSha) return false;
 
   const newCommit = await ghApi('POST', `/repos/${ORG}/${repo}/git/commits`, {
-    message: 'security(cloud-guardian): auto-disinfect & enforce sentinel v3',
+    message: 'security(guardian): auto-disinfect branch & enforce Sentinel v4',
     tree: newTree.sha,
-    parents: [commitSha],
+    parents: [headSha],
   });
 
-  await ghApi('PATCH', `/repos/${ORG}/${repo}/git/refs/heads/${encodeURIComponent(branch)}`, {
+  await ghApi('PATCH', `/repos/${ORG}/${repo}/git/refs/heads/${encodeURIComponent(branchName)}`, {
     sha: newCommit.sha,
     force: false,
   });
 
-  console.log(`[AUTO-DISINFECTED] ${repo}@${branch} -> ${newCommit.sha.slice(0, 7)} (${actions.join(', ')})`);
+  console.log(`[DISINFECTED] Target #${idx}: remediated ${issues} issue(s).`);
   return true;
 }
 
-const processedEvents = new Set();
-
-async function discoverOmniRepos() {
+async function getOmniRepos() {
   let all = [];
-  for (let p = 1; p <= 4; p++) {
-    const page = await ghApi('GET', `/orgs/${ORG}/repos?per_page=100&page=${p}`);
-    if (!page || !page.length) break;
-    all.push(...page);
+  for (let page = 1; page <= 3; page++) {
+    const res = await ghApi('GET', `/orgs/${ORG}/repos?per_page=100&page=${page}`);
+    if (!Array.isArray(res) || res.length === 0) break;
+    all.push(...res);
   }
-  return all
-    .filter((r) => r.name.toLowerCase().includes('omni') && !r.archived && r.name !== 'OmniNextTechInboundMailWorker' && r.name !== 'omni-security-guardian')
-    .map((r) => r.name);
+  const omni = all
+    .filter(r => /omni/i.test(r.name) && !r.archived && r.size > 0 && r.name !== 'omni-security-guardian')
+    .map(r => r.name)
+    .sort();
+  // Mask all private repo names in GitHub Actions logs
+  for (const name of omni) {
+    console.log(`::add-mask::${name}`);
+  }
+  return omni;
 }
 
-async function pollOnce(omniRepos, cutoffIso) {
-  for (const repo of omniRepos) {
+const processedActivityIds = new Set();
+
+async function pollOnce(repos, isFirstRun) {
+  let actionsTaken = 0;
+  for (let i = 0; i < repos.length; i++) {
+    const repo = repos[i];
     try {
-      const acts = await ghApi('GET', `/repos/${ORG}/${repo}/activity?per_page=10`);
-      if (!Array.isArray(acts)) continue;
+      const activities = await ghApi('GET', `/repos/${ORG}/${repo}/activity?per_page=10`);
+      if (!Array.isArray(activities)) continue;
 
-      for (const a of acts) {
-        if (a.timestamp < cutoffIso) continue;
-        if (processedEvents.has(a.id)) continue;
-        processedEvents.add(a.id);
+      for (const act of activities) {
+        if (processedActivityIds.has(act.id)) continue;
+        processedActivityIds.add(act.id);
 
-        const actor = a.actor?.login || 'unknown';
-        if (actor === 'Zoytx' || actor === 'github-actions[bot]') continue;
-        if (!a.ref || !a.ref.startsWith('refs/heads/')) continue;
-        const branch = a.ref.replace('refs/heads/', '');
+        const ageMs = Date.now() - new Date(act.timestamp).getTime();
+        if (isFirstRun && ageMs > 15 * 60 * 1000) continue;
 
-        if (a.activity_type === 'force_push') {
-          console.log(`[🚨 FORCE PUSH DETECTED] ${repo}@${branch} by ${actor} (${a.before?.slice(0, 7)} -> ${a.after?.slice(0, 7)})`);
-          const beforeClean = a.before && a.before !== '0000000000000000000000000000000000000000' && (await isCommitClean(repo, a.before));
+        const branchName = (act.ref || '').replace(/^refs\/heads\//, '');
+        if (!branchName) continue;
+
+        if (act.activity_type === 'force_push') {
+          console.log(`[ALERT] Force-push detected on protected target #${i + 1}`);
+          const beforeClean = await isCommitClean(repo, act.before);
           if (beforeClean) {
-            await ghApi('PATCH', `/repos/${ORG}/${repo}/git/refs/heads/${encodeURIComponent(branch)}`, {
-              sha: a.before,
+            await ghApi('PATCH', `/repos/${ORG}/${repo}/git/refs/heads/${encodeURIComponent(branchName)}`, {
+              sha: act.before,
               force: true,
             });
-            console.log(`[✅ AUTO-REVERTED FORCE PUSH] ${repo}@${branch} rolled back to clean commit ${a.before.slice(0, 7)}`);
+            console.log(`[REVERTED] Rolled back force-push on target #${i + 1}`);
+            actionsTaken++;
           } else {
-            await disinfectBranch(repo, branch);
+            const fixed = await disinfectBranch(repo, branchName, act.after, i + 1);
+            if (fixed) actionsTaken++;
           }
-          continue;
-        }
-
-        if (a.activity_type === 'push') {
-          const afterClean = await isCommitClean(repo, a.after);
+        } else if (act.activity_type === 'push') {
+          const afterClean = await isCommitClean(repo, act.after);
           if (!afterClean) {
-            console.log(`[🚨 MALWARE / SENTINEL DOWNGRADE IN PUSH] ${repo}@${branch} by ${actor} (${a.after?.slice(0, 7)})`);
-            await disinfectBranch(repo, branch);
+            const fixed = await disinfectBranch(repo, branchName, act.after, i + 1);
+            if (fixed) actionsTaken++;
           }
         }
       }
     } catch {}
   }
+  return actionsTaken;
 }
 
-async function main() {
-  const omniRepos = await discoverOmniRepos();
-  const cutoffIso = new Date(Date.now() - 15 * 60_000).toISOString();
-  console.log(`Cloud Guardian scanning ${omniRepos.length} Omni repos (events since ${cutoffIso})...`);
-  // Run 12 sweeps over 4 minutes (every 20 seconds) inside each 5-minute cron window
-  const sweeps = process.env.SINGLE_SWEEP === '1' ? 1 : 12;
-  for (let i = 0; i < sweeps; i++) {
-    await pollOnce(omniRepos, cutoffIso);
-    if (i + 1 < sweeps) await new Promise((r) => setTimeout(r, 20_000));
+(async () => {
+  const repos = await getOmniRepos();
+  console.log(`[Omni Cloud Guardian] Monitoring ${repos.length} private repositories (all names masked)...`);
+  const singleSweep = process.env.SINGLE_SWEEP === '1';
+  if (singleSweep) {
+    const actions = await pollOnce(repos, true);
+    console.log(`[Omni Cloud Guardian] Sweep complete. Remediations executed: ${actions}`);
+    return;
   }
-  console.log('Cloud Guardian sweep complete.');
-}
-main();
+  // 4-minute continuous polling window inside 5-minute cron
+  const endTime = Date.now() + 4 * 60 * 1000;
+  let first = true;
+  while (Date.now() < endTime) {
+    await pollOnce(repos, first);
+    first = false;
+    await new Promise(r => setTimeout(r, 20000));
+  }
+  console.log('[Omni Cloud Guardian] 4-minute cycle complete.');
+})();

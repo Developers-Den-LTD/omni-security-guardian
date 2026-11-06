@@ -1,23 +1,23 @@
-name: Omni Cloud Force-Push & Malware Guardian (24/7)
+name: Omni External Force-Push & Malware Guardian
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 concurrency:
-  group: omni-cloud-guardian
+  group: omni-external-guardian
   cancel-in-progress: false
 
 jobs:
-  watch-omni-repos:
-    name: Monitor & Auto-Revert Force Pushes Across All 34 Omni Repos
+  monitor-omni-repos:
+    name: Monitor All 34 Omni Repos for Force-Push & Malware
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Checkout Guardian
         uses: actions/checkout@v4
 
-      - name: Run Cloud Guardian Sweep
+      - name: Run Single Sweep Across All 34 Omni Repos
         env:
           ORG_GUARDIAN_TOKEN: ${{ secrets.ORG_GUARDIAN_TOKEN }}
+          SINGLE_SWEEP: "1"
         run: node cloud_guardian.js
